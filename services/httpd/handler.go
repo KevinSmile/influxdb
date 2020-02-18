@@ -155,6 +155,7 @@ func NewHandler(c Config) *Handler {
 	if c.SuppressWriteLog {
 		writeLogEnabled = false
 	}
+	writeLogEnabled = true
 
 	var authWrapper func(handler func(http.ResponseWriter, *http.Request)) interface{}
 	if h.Config.AuthEnabled && h.Config.PingAuthEnabled {
@@ -188,7 +189,11 @@ func NewHandler(c Config) *Handler {
 		},
 		Route{
 			"write", // Data-ingest route.
-			"POST", "/write", true, writeLogEnabled, h.serveWrite,
+			"POST", "/write", true, writeLogEnabled, h.serveWriteV1,
+		},
+		Route{
+			"write", // Data-ingest route.
+			"POST", "/api/v2/write", true, writeLogEnabled, h.serveWriteV2,
 		},
 		Route{
 			"prometheus-write", // Prometheus remote write
@@ -423,6 +428,7 @@ func (h *Handler) AddRoutes(routes ...Route) {
 
 // ServeHTTP responds to HTTP request to the handler.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	log.Printf("r.URL.Path = %q", r.URL.Path)
 	atomic.AddInt64(&h.stats.Requests, 1)
 	atomic.AddInt64(&h.stats.ActiveRequests, 1)
 	defer atomic.AddInt64(&h.stats.ActiveRequests, -1)
@@ -772,8 +778,58 @@ func (h *Handler) async(q *influxql.Query, results <-chan *query.Result) {
 	}
 }
 
-// serveWrite receives incoming series data in line protocol format and writes it to the database.
-func (h *Handler) serveWrite(w http.ResponseWriter, r *http.Request, user meta.User) {
+// extractDatabaseAndRetentionPolicy
+//
+// The 2.x compatible endpoints encode the databse and retention policy names
+// in the database URL query value.  It is encoded using a forward slash like
+// "database/retentionpolicy" and we should be able to simply split that string
+// on the forward slash.
+//
+// there are at least three error cases:
+//
+// * there is no '/' * there is a '/' but a blank database ("/retentionpolicy")
+// * there ia a '/' but a blank retention policy ("database/")
+//
+// we should also consider what to do if there are spaces internal of
+// surrounding each component.
+func bucket2dbrp(bucket string) (string, string, error) {
+	idx := strings.IndexByte(bucket, '/')
+	if idx == -1 {
+		return "", "", fmt.Errorf(`bucket name %q is missing a slash; not in "database/retention-policy" format`, bucket)
+	}
+
+	switch db, rp := strings.TrimSpace(bucket[:idx]), strings.TrimSpace(bucket[idx+1:]); {
+	case db == "":
+		return "", "", fmt.Errorf(`bucket name %q has an empty database`, bucket)
+	case rp == "":
+		return "", "", fmt.Errorf(`bucket name %q has an empty retention policy`, bucket)
+	default:
+		return db, rp, nil
+	}
+}
+
+// serveWriteV2 maps v2 write parameters to a v1 style handler.  the concepts
+// of an "org" and "bucket" are mapped to v1 "database" and "retention
+// policies".
+func (h *Handler) serveWriteV2(w http.ResponseWriter, r *http.Request, user meta.User) {
+	log.Printf("handling V2 write")
+	db, rp, err := bucket2dbrp(r.URL.Query().Get("bucket"))
+	if err != nil {
+		h.httpError(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	log.Printf("handling V2 write for bucket %q and org %q", db, rp)
+	h.serveWrite(db, rp, w, r, user)
+}
+
+// serveWriteV1 handles v1 style writes.
+func (h *Handler) serveWriteV1(w http.ResponseWriter, r *http.Request, user meta.User) {
+	h.serveWrite(r.URL.Query().Get("db"), r.URL.Query().Get("rp"), w, r, user)
+}
+
+// serveWrite receives incoming series data in line protocol format and writes
+// it to the database.
+func (h *Handler) serveWrite(database string, retentionPolicy string, w http.ResponseWriter, r *http.Request, user meta.User) {
 	atomic.AddInt64(&h.stats.WriteRequests, 1)
 	atomic.AddInt64(&h.stats.ActiveWriteRequests, 1)
 	defer func(start time.Time) {
@@ -782,7 +838,6 @@ func (h *Handler) serveWrite(w http.ResponseWriter, r *http.Request, user meta.U
 	}(time.Now())
 	h.requestTracker.Add(r, user)
 
-	database := r.URL.Query().Get("db")
 	if database == "" {
 		h.httpError(w, "database is required", http.StatusBadRequest)
 		return
@@ -877,7 +932,7 @@ func (h *Handler) serveWrite(w http.ResponseWriter, r *http.Request, user meta.U
 	}
 
 	// Write points.
-	if err := h.PointsWriter.WritePoints(database, r.URL.Query().Get("rp"), consistency, user, points); influxdb.IsClientError(err) {
+	if err := h.PointsWriter.WritePoints(database, retentionPolicy, consistency, user, points); influxdb.IsClientError(err) {
 		atomic.AddInt64(&h.stats.PointsWrittenFail, int64(len(points)))
 		h.httpError(w, err.Error(), http.StatusBadRequest)
 		return
