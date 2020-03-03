@@ -5,6 +5,7 @@ import (
 	"io"
 
 	"github.com/influxdata/flux"
+	"github.com/influxdata/flux/ast"
 	"github.com/influxdata/influxdb/kit/check"
 )
 
@@ -32,4 +33,11 @@ type ProxyQueryService interface {
 	// Query performs the requested query and encodes the results into w.
 	// The number of bytes written to w is returned __independent__ of any error.
 	Query(ctx context.Context, w io.Writer, req *ProxyRequest) (flux.Statistics, error)
+}
+
+// LanguageService will return a language that is supported by this service for
+// parsing and analysis.
+type LanguageService interface {
+	// Parse will take flux source code and produce a package.
+	Parse(source string) *ast.Package
 }

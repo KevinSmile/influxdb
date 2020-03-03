@@ -38,6 +38,7 @@ import (
 	infprom "github.com/influxdata/influxdb/prometheus"
 	"github.com/influxdata/influxdb/query"
 	"github.com/influxdata/influxdb/query/control"
+	"github.com/influxdata/influxdb/query/language"
 	"github.com/influxdata/influxdb/query/stdlib/influxdata/influxdb"
 	"github.com/influxdata/influxdb/snowflake"
 	"github.com/influxdata/influxdb/source"
@@ -795,6 +796,7 @@ func (m *Launcher) run(ctx context.Context) (err error) {
 		OnboardingService:               onboardingSvc,
 		InfluxQLService:                 nil, // No InfluxQL support
 		FluxService:                     storageQueryService,
+		LanguageService:                 language.DefaultService,
 		TaskService:                     taskSvc,
 		TelegrafService:                 telegrafSvc,
 		NotificationRuleStore:           notificationRuleSvc,
